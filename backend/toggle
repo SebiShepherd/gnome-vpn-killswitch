@@ -8,33 +8,49 @@ CONFIG=/etc/gnome-vpn-killswitch/config
 : "${VPN_ENDPOINT_HOST:?VPN_ENDPOINT_HOST not set in $CONFIG}"
 : "${VPN_ENDPOINT_PORT:?VPN_ENDPOINT_PORT not set in $CONFIG}"
 
-# Surfshark's endpoint hostname is anycast/round-robin: a fresh DNS lookup
-# can return a different IP than the one the tunnel actually connected to.
-# Prefer the live, already-negotiated endpoint whenever the interface exists;
-# only fall back to a fresh hostname lookup to bootstrap a cold start, where
-# no live endpoint exists yet.
-resolve_endpoint_ip() {
+# Surfshark's endpoint hostname is anycast/round-robin: a fresh DNS lookup can
+# return a different IP than the one the tunnel actually connected to, and while
+# the kill switch is on the WireGuard handshake to reconnect can't reach a server
+# that isn't in the allow-list. So we allow the handshake to the whole current
+# set of resolved endpoint IPs, plus the live negotiated one if present — this is
+# what lets a disconnected tunnel reconnect without turning the kill switch off.
+endpoint_ips() {
+    local -A seen=()
+    local live ip
+
     if ip link show "$VPN_IFACE" &>/dev/null; then
-        local live
+        # "(none)" appears when the interface is up but the peer endpoint isn't
+        # negotiated yet (e.g. mid-reconnect) — must not be treated as an IP.
         live="$(wg show "$VPN_IFACE" endpoints 2>/dev/null | awk '{print $2}' | cut -d: -f1)" || true
-        [ -n "$live" ] && { echo "$live"; return; }
+        [[ "$live" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && seen["$live"]=1
     fi
-    getent ahostsv4 "$VPN_ENDPOINT_HOST" | awk '{print $1; exit}'
+
+    while read -r ip; do
+        [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && seen["$ip"]=1
+    done < <(getent ahostsv4 "$VPN_ENDPOINT_HOST" | awk '{print $1}')
+
+    local out=""
+    for ip in "${!seen[@]}"; do out+="${out:+, }$ip"; done
+    echo "$out"
 }
 
 load_rules() {
-    local ip
-    ip="$(resolve_endpoint_ip)"
-    [ -n "$ip" ] || { echo "could not determine endpoint IP for $VPN_ENDPOINT_HOST" >&2; return 1; }
-    nft delete table inet killswitch 2>/dev/null || true
+    local ips
+    ips="$(endpoint_ips)"
+    [ -n "$ips" ] || { echo "could not determine any endpoint IP for $VPN_ENDPOINT_HOST" >&2; return 1; }
+    # One atomic nft transaction: the `table` + `delete table` preamble makes the
+    # whole thing all-or-nothing. If the new ruleset fails to parse, nft rolls back
+    # and the OLD kill-switch table stays in place — never a window with no rules.
     nft -f - <<EOF
+table inet killswitch
+delete table inet killswitch
 table inet killswitch {
     chain output {
         type filter hook output priority 0; policy drop;
         oifname "lo" accept
         ct state established,related accept
         oifname "$VPN_IFACE" accept
-        ip daddr $ip udp dport $VPN_ENDPOINT_PORT accept
+        ip daddr { $ips } udp dport $VPN_ENDPOINT_PORT accept
     }
 }
 EOF
