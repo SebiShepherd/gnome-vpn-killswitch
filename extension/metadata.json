@@ -1,0 +1,7 @@
+{
+  "uuid": "gnome-vpn-killswitch@sebischaefer.github.io",
+  "name": "VPN Kill Switch",
+  "description": "Quick Settings toggle for a strict, nftables-backed VPN kill switch.",
+  "shell-version": ["50"],
+  "url": "https://github.com/SebiShepherd/gnome-vpn-killswitch"
+}
