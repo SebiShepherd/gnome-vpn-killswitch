@@ -13,8 +13,18 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ENDPOINT="$(grep -oP '^Endpoint\s*=\s*\K\S+' "$WG_CONF")"
 [ -n "$ENDPOINT" ] || { echo "no Endpoint= line found in $WG_CONF" >&2; exit 1; }
-ENDPOINT_IP="${ENDPOINT%:*}"
+ENDPOINT_HOST="${ENDPOINT%:*}"
 ENDPOINT_PORT="${ENDPOINT##*:}"
+
+if [[ "$ENDPOINT_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  ENDPOINT_IP="$ENDPOINT_HOST"
+else
+  # The nftables rule needs a literal IP: resolving the hostname at
+  # rule-load time would need network access the kill switch itself gates.
+  ENDPOINT_IP="$(getent ahostsv4 "$ENDPOINT_HOST" | awk '{print $1; exit}')"
+  [ -n "$ENDPOINT_IP" ] || { echo "could not resolve $ENDPOINT_HOST" >&2; exit 1; }
+  echo "resolved $ENDPOINT_HOST -> $ENDPOINT_IP"
+fi
 
 install -d -m 755 /usr/local/libexec/gnome-vpn-killswitch
 install -m 755 "$DIR/toggle" /usr/local/libexec/gnome-vpn-killswitch/toggle
