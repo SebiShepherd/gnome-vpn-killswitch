@@ -1,0 +1,39 @@
+#!/bin/bash
+set -euo pipefail
+
+CONFIG=/etc/gnome-vpn-killswitch/config
+[ -r "$CONFIG" ] || { echo "missing $CONFIG" >&2; exit 1; }
+. "$CONFIG"
+: "${VPN_IFACE:?VPN_IFACE not set in $CONFIG}"
+: "${VPN_ENDPOINT_IP:?VPN_ENDPOINT_IP not set in $CONFIG}"
+: "${VPN_ENDPOINT_PORT:?VPN_ENDPOINT_PORT not set in $CONFIG}"
+
+case "${1:-}" in
+  on)
+    # The endpoint allow-rule is required so the WireGuard handshake itself
+    # (sent over the physical interface, before the tunnel exists) isn't
+    # blocked by the same rule set that's supposed to protect it.
+    nft delete table inet killswitch 2>/dev/null || true
+    nft -f - <<EOF
+table inet killswitch {
+    chain output {
+        type filter hook output priority 0; policy drop;
+        oifname "lo" accept
+        ct state established,related accept
+        oifname "$VPN_IFACE" accept
+        ip daddr $VPN_ENDPOINT_IP udp dport $VPN_ENDPOINT_PORT accept
+    }
+}
+EOF
+    ;;
+  off)
+    nft delete table inet killswitch 2>/dev/null || true
+    ;;
+  status)
+    nft list table inet killswitch >/dev/null 2>&1 && echo on || echo off
+    ;;
+  *)
+    echo "usage: $0 {on|off|status}" >&2
+    exit 1
+    ;;
+esac

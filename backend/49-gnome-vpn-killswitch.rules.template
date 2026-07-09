@@ -1,0 +1,6 @@
+polkit.addRule(function(action, subject) {
+    if (action.id == "com.github.sebischaefer.gnomevpnkillswitch.toggle" &&
+        subject.user == "__USER__") {
+        return polkit.Result.YES;
+    }
+});
