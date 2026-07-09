@@ -5,14 +5,27 @@ CONFIG=/etc/gnome-vpn-killswitch/config
 [ -r "$CONFIG" ] || { echo "missing $CONFIG" >&2; exit 1; }
 . "$CONFIG"
 : "${VPN_IFACE:?VPN_IFACE not set in $CONFIG}"
-: "${VPN_ENDPOINT_IP:?VPN_ENDPOINT_IP not set in $CONFIG}"
+: "${VPN_ENDPOINT_HOST:?VPN_ENDPOINT_HOST not set in $CONFIG}"
 : "${VPN_ENDPOINT_PORT:?VPN_ENDPOINT_PORT not set in $CONFIG}"
 
-case "${1:-}" in
-  on)
-    # The endpoint allow-rule is required so the WireGuard handshake itself
-    # (sent over the physical interface, before the tunnel exists) isn't
-    # blocked by the same rule set that's supposed to protect it.
+# Surfshark's endpoint hostname is anycast/round-robin: a fresh DNS lookup
+# can return a different IP than the one the tunnel actually connected to.
+# Prefer the live, already-negotiated endpoint whenever the interface exists;
+# only fall back to a fresh hostname lookup to bootstrap a cold start, where
+# no live endpoint exists yet.
+resolve_endpoint_ip() {
+    if ip link show "$VPN_IFACE" &>/dev/null; then
+        local live
+        live="$(wg show "$VPN_IFACE" endpoints 2>/dev/null | awk '{print $2}' | cut -d: -f1)" || true
+        [ -n "$live" ] && { echo "$live"; return; }
+    fi
+    getent ahostsv4 "$VPN_ENDPOINT_HOST" | awk '{print $1; exit}'
+}
+
+load_rules() {
+    local ip
+    ip="$(resolve_endpoint_ip)"
+    [ -n "$ip" ] || { echo "could not determine endpoint IP for $VPN_ENDPOINT_HOST" >&2; return 1; }
     nft delete table inet killswitch 2>/dev/null || true
     nft -f - <<EOF
 table inet killswitch {
@@ -21,19 +34,28 @@ table inet killswitch {
         oifname "lo" accept
         ct state established,related accept
         oifname "$VPN_IFACE" accept
-        ip daddr $VPN_ENDPOINT_IP udp dport $VPN_ENDPOINT_PORT accept
+        ip daddr $ip udp dport $VPN_ENDPOINT_PORT accept
     }
 }
 EOF
+}
+
+case "${1:-}" in
+  on)
+    load_rules
     ;;
   off)
     nft delete table inet killswitch 2>/dev/null || true
+    ;;
+  refresh)
+    # No-op if the switch is currently off — never turns it on as a side effect.
+    nft list table inet killswitch >/dev/null 2>&1 && load_rules || true
     ;;
   status)
     nft list table inet killswitch >/dev/null 2>&1 && echo on || echo off
     ;;
   *)
-    echo "usage: $0 {on|off|status}" >&2
+    echo "usage: $0 {on|off|refresh|status}" >&2
     exit 1
     ;;
 esac

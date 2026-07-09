@@ -1,0 +1,18 @@
+#!/bin/bash
+# Installed to /etc/NetworkManager/dispatcher.d/ — NetworkManager runs this
+# as root on every connection state change and passes: $1=interface $2=action.
+set -euo pipefail
+
+CONFIG=/etc/gnome-vpn-killswitch/config
+[ -r "$CONFIG" ] || exit 0
+. "$CONFIG"
+
+INTERFACE="$1"
+ACTION="$2"
+
+[ "$INTERFACE" = "${VPN_IFACE:-}" ] || exit 0
+[ "$ACTION" = "up" ] || [ "$ACTION" = "vpn-up" ] || exit 0
+
+# Re-pins the kill switch's allow-rule to the endpoint the tunnel actually
+# connected to (only takes effect if the kill switch is already on).
+/usr/local/libexec/gnome-vpn-killswitch/toggle refresh
